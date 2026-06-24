@@ -1,6 +1,6 @@
-# CrossPoint USB — Total/Double Commander file-system plugin (WFX)
+# WitchReader USB — Total/Double Commander file-system plugin (WFX)
 
-Browse and manage the e-reader's SD card from **Total Commander** (Windows) or
+Browse and manage the XTEink X3/X4 e-reader's SD card from **Total Commander** (Windows) or
 **Double Commander** (Windows/Linux) over the USB cable — list directories,
 copy files to/from the device, rename/move, delete, and create folders.
 
