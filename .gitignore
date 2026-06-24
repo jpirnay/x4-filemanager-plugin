@@ -1,0 +1,15 @@
+# Built WFX plugin binaries
+wfx/crosspoint.wfx
+wfx/crosspoint.wfx64
+
+# Diagnostic tool binaries and temp output
+diagnose/diagnose
+diagnose/diagnose.exe
+diagnose/diagnose_download.tmp
+
+# Release packages
+dist/
+
+# Python
+*.pyc
+__pycache__/
