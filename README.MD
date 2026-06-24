@@ -58,8 +58,9 @@ Manual alternative (e.g. running from the build tree):
 
 ## Use
 
-1. On the reader: **File Transfer → USB Transfer** (this arms the connection).
-2. Plug in USB and open **CrossPoint USB** in the commander.
+1. On Witch Reader: **File Transfer → USB Transfer** (this arms the connection).
+2. On microreader: Open home screen
+3. Plug in USB and open **CrossPoint USB** in the commander.
 
 Notes:
 - Opening the port resets the ESP32-C3 once; the reader reboots straight back
