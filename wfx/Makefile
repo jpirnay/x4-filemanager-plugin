@@ -19,7 +19,7 @@
 
 SRC    := crosspoint.c ../protocol/cp_serial.c
 HDR    := ../protocol/cp_serial.h wfxplugin.h
-EXTRA  := pluginst.inf README.md
+EXTRA  := pluginst.inf ../README.MD
 CFLAGS := -O2 -Wall -Wextra -Wno-format-truncation -fvisibility=hidden
 WINCC32 := i686-w64-mingw32-gcc
 WINCC64 := x86_64-w64-mingw32-gcc
