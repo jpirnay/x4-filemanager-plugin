@@ -4,6 +4,9 @@ Browse and manage the e-reader's SD card from **Total Commander** (Windows) or
 **Double Commander** (Windows/Linux) over the USB cable — list directories,
 copy files to/from the device, rename/move, delete, and create folders.
 
+- Total Commander: https://www.ghisler.com
+- Double Commander: https://doublecmd.sourceforge.io/
+
 It speaks the serial protocol originally designed for
 [MicroReader](https://github.com/CidVonHighwind/microreader) by CidVonHighwind,
 and is wire-compatible with both MicroReader and
