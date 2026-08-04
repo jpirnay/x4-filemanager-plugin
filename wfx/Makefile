@@ -6,14 +6,14 @@
 #                               (Linux/WSL only: needs i686-/x86_64-w64-mingw32-gcc)
 #   make dist-windows-native  # same zip, from an MSYS2 MinGW64 shell on Windows
 #                               (run once from MinGW64 shell, once from MinGW32 shell,
-#                               or just run build.bat which does both automatically)
+#                               or just run build.ps1 which does both automatically)
 #   make clean
 #
 # A release zip contains the plugin binary + pluginst.inf so Total/Double
 # Commander can install it with one click (open the zip from within the
 # commander). The .wfx is a native binary, so each OS gets its own zip.
 #
-# On Windows: use build.bat (it calls MSYS2 make for both 32-bit and 64-bit).
+# On Windows: use build.ps1 (it calls MSYS2 make for both 32-bit and 64-bit).
 # Install MSYS2 from https://www.msys2.org/, then in any MSYS2 shell:
 #   pacman -S mingw-w64-x86_64-gcc mingw-w64-i686-gcc make zip
 
@@ -30,15 +30,15 @@ PKG    := crosspoint-usb-wfx
 all: linux
 linux: crosspoint.wfx
 crosspoint.wfx: $(SRC) $(HDR)
-	$(CC) -shared -fPIC $(CFLAGS) -o $@ $(SRC)
+	$(CC) -shared -fPIC $(CFLAGS) -o $@ $(SRC) -lpthread
 
 dist: dist-linux
 	@echo "For the Windows zip on Linux/WSL: 'make dist-windows'."
-	@echo "On Windows with MSYS2: run build.bat."
+	@echo "On Windows with MSYS2: run build.ps1."
 
 dist-linux: $(SRC) $(HDR) $(EXTRA)
 	rm -rf ../dist/linux && mkdir -p ../dist/linux
-	$(CC) -shared -fPIC $(CFLAGS) -o ../dist/linux/crosspoint.wfx $(SRC)
+	$(CC) -shared -fPIC $(CFLAGS) -o ../dist/linux/crosspoint.wfx $(SRC) -lpthread
 	cp $(EXTRA) ../dist/linux/
 	cd ../dist/linux && zip -j ../$(PKG)-linux-x86_64.zip crosspoint.wfx $(EXTRA)
 	@echo "-> dist/$(PKG)-linux-x86_64.zip"
@@ -52,9 +52,9 @@ dist-windows: $(SRC) $(HDR) $(EXTRA)
 	cd ../dist/win && zip -j ../$(PKG)-windows.zip crosspoint.wfx crosspoint.wfx64 $(EXTRA)
 	@echo "-> dist/$(PKG)-windows.zip"
 
-# Native Windows build from an MSYS2 shell. build.bat calls this target twice
+# Native Windows build from an MSYS2 shell. build.ps1 calls this target twice
 # (once per arch); each invocation builds whichever arch the shell provides and
-# drops it into dist/win so build.bat can zip them together.
+# drops it into dist/win so build.ps1 can zip them together.
 dist-windows-native: $(SRC) $(HDR)
 	mkdir -p ../dist/win
 	$(CC) -shared $(CFLAGS) -o ../dist/win/$(NATIVE_OUT) $(SRC) -static-libgcc -lsetupapi

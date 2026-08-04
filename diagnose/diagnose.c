@@ -67,7 +67,11 @@ static void raw_ack_probe(const char* port, const char* dl_path) {
 // Helper: read exactly n bytes, return actual count received within timeout_ms.
 #define RAW_READ(buf, n, ms) raw_read_exact(h, buf, n, ms)
 
-  // Warm up: send STATUS, drain response.
+  // Warm up: send STATUS, and inspect the response to tell Witchhunt (SD is
+  // root /, no prefix) from MicroReader (SD at /sdcard) — same detection
+  // wait_ready() in cp_serial.c does via the "largest=" marker. Getting this
+  // wrong makes the raw probe send ERR:fopen on a Witchhunt device even
+  // though the real plugin path works fine.
   Sleep(200);
   PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
   {
@@ -75,14 +79,32 @@ static void raw_ack_probe(const char* port, const char* dl_path) {
     DWORD wr = 0;
     WriteFile(h, sc, 5, &wr, NULL);
   }
-  Sleep(300);
+  int is_microreader = 0;
+  {
+    COMMTIMEOUTS to = {0};
+    to.ReadIntervalTimeout = MAXDWORD;
+    to.ReadTotalTimeoutConstant = 2000;
+    SetCommTimeouts(h, &to);
+    char statusbuf[512];
+    int si = 0;
+    DWORD sdeadline = GetTickCount() + 2000;
+    while (GetTickCount() < sdeadline && si < (int)sizeof(statusbuf) - 1) {
+      unsigned char c;
+      DWORD rd = 0;
+      ReadFile(h, &c, 1, &rd, NULL);
+      if (!rd) break;
+      statusbuf[si++] = (char)c;
+    }
+    statusbuf[si] = '\0';
+    is_microreader = strstr(statusbuf, "largest=") != NULL;
+  }
   PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
-  printf("  Warmed up (STATUS sent+drained).\n");
+  printf("  Warmed up (STATUS sent+drained, %s detected).\n", is_microreader ? "MicroReader" : "Witchhunt");
   fflush(stdout);
 
   // Build CMND T frame.
   const char* pfx = "/sdcard";
-  int need_pfx = (strncmp(dl_path, pfx, strlen(pfx)) != 0);
+  int need_pfx = is_microreader && strncmp(dl_path, pfx, strlen(pfx)) != 0;
   char full[512];
   snprintf(full, sizeof(full), "%s%s", need_pfx ? pfx : "", dl_path);
   uint16_t plen = (uint16_t)strlen(full);

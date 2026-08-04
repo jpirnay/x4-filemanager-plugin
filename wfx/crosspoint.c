@@ -14,8 +14,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
 #include "../protocol/cp_serial.h"
 #include "wfxplugin.h"
+
+// --- serialization ------------------------------------------------------
+// Total Commander can invoke WFX entry points from more than one thread at a
+// time (e.g. its background transfer manager, or a directory refresh
+// overlapping an in-flight download). g_conn is a single serial connection
+// shared by every operation; without a lock, two concurrent commands can
+// interleave on the wire — one call's port_flush_in() can discard the bytes
+// of another call's in-flight response (observed as "no READY received"
+// right after the device reports it sent the file). Double Commander appears
+// to serialize these calls itself, which is why the bug is TC-specific.
+#ifdef _WIN32
+static CRITICAL_SECTION g_lock;
+static LONG g_lock_init_flag = 0;  // 0 = not started, 1 = started/done
+static void lock_init(void) {
+  if (InterlockedCompareExchange(&g_lock_init_flag, 1, 0) == 0) InitializeCriticalSection(&g_lock);
+}
+static void lock_acquire(void) { EnterCriticalSection(&g_lock); }
+static void lock_release(void) { LeaveCriticalSection(&g_lock); }
+#else
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static void lock_init(void) {}
+static void lock_acquire(void) { pthread_mutex_lock(&g_lock); }
+static void lock_release(void) { pthread_mutex_unlock(&g_lock); }
+#endif
 
 // --- callbacks / state ------------------------------------------------------
 static int g_plugin_nr = 0;
@@ -132,8 +162,10 @@ static void drop_conn(void) {
 }
 
 static void disconnect(void) {
+  lock_acquire();
   drop_conn();
   g_disconnected = 1;
+  lock_release();
 }
 
 // Called by Total/Double Commander when the user disconnects (e.g. right-click
@@ -224,21 +256,30 @@ static int collect_cb(const CpEntry* e, void* user) {
 // Returns a valid (possibly empty) FindState for an empty directory so that
 // Total Commander can enter it — FsFindFirst will synthesize a "." placeholder.
 static FindState* do_list(const char* utf8_dir) {
+  lock_acquire();
   // User is actively entering the plugin — clear the disconnect flag so
   // conn() will open a fresh connection.
   g_disconnected = 0;
   CpSerial* c = conn();
-  if (!c) return NULL;
+  if (!c) {
+    lock_release();
+    return NULL;
+  }
   FindState* st = (FindState*)calloc(1, sizeof(FindState));
-  if (!st) return NULL;
+  if (!st) {
+    lock_release();
+    return NULL;
+  }
   if (cp_list_dir(c, utf8_dir, collect_cb, st) != 0) {
     logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
     drop_conn();
     free(st->items);
     free(st);
+    lock_release();
     return NULL;
   }
   st->idx = 1;
+  lock_release();
   return st;
 }
 
@@ -248,76 +289,129 @@ typedef struct {
   void* dst;
 } ProgCtx;
 
+// Total Commander's progress callback can pump its message loop and, from
+// there, issue another WFX call on a different thread (e.g. a UI-thread
+// dispatch triggered by a progress-dialog repaint). If that nested call
+// blocks on g_lock while we're still holding it here, and TC's calling
+// thread is itself waiting on that nested call to finish, the transfer
+// deadlocks — the device keeps sending bytes into the OS receive buffer
+// but nothing drains it, and the next read_exact() eventually times out
+// partway through a chunk ("timeout: got N of 2048 bytes"). Release the
+// lock for the duration of the callback so any reentrant call can proceed.
 static int progress_cb(uint64_t done, uint64_t total, void* user) {
   ProgCtx* p = (ProgCtx*)user;
   int pct = total ? (int)((done * 100) / total) : 0;
-  if (g_unicode) return g_progW ? g_progW(g_plugin_nr, (WCHAR*)p->src, (WCHAR*)p->dst, pct) : 0;
-  return g_progA ? g_progA(g_plugin_nr, (char*)p->src, (char*)p->dst, pct) : 0;
+  lock_release();
+  int rc;
+  if (g_unicode) rc = g_progW ? g_progW(g_plugin_nr, (WCHAR*)p->src, (WCHAR*)p->dst, pct) : 0;
+  else rc = g_progA ? g_progA(g_plugin_nr, (char*)p->src, (char*)p->dst, pct) : 0;
+  lock_acquire();
+  return rc;
 }
 
 // --- transfer / op cores (UTF-8) --------------------------------------------
 static int do_get(const char* remote, const char* local, void* psrc, void* pdst, int copyflags) {
+  lock_acquire();
   CpSerial* c = conn();
-  if (!c) return FS_FILE_READERROR;
+  if (!c) {
+    lock_release();
+    return FS_FILE_READERROR;
+  }
   if (!cp_download_supported(c)) {
     logmsg(MSGTYPE_IMPORTANTERROR, "CrossPoint USB: file download not supported by this firmware.");
+    lock_release();
     return FS_FILE_NOTSUPPORTED;
   }
-  if (!(copyflags & FS_COPYFLAGS_OVERWRITE) && cp_local_exists(local)) return FS_FILE_EXISTS;
+  if (!(copyflags & FS_COPYFLAGS_OVERWRITE) && cp_local_exists(local)) {
+    lock_release();
+    return FS_FILE_EXISTS;
+  }
   ProgCtx ctx = {psrc, pdst};
+  int rc = FS_FILE_OK;
   if (cp_download(c, remote, local, progress_cb, &ctx) != 0) {
     const char* err = cp_last_error(c);
     logmsg(MSGTYPE_IMPORTANTERROR, err);
-    if (strstr(err, "aborted")) return FS_FILE_USERABORT;
-    drop_conn();
-    return FS_FILE_READERROR;
+    if (strstr(err, "aborted")) {
+      rc = FS_FILE_USERABORT;
+    } else {
+      drop_conn();
+      rc = FS_FILE_READERROR;
+    }
   }
-  return FS_FILE_OK;
+  lock_release();
+  return rc;
 }
 
 static int do_put(const char* local, const char* remote, void* psrc, void* pdst) {
+  lock_acquire();
   CpSerial* c = conn();
-  if (!c) return FS_FILE_WRITEERROR;
+  if (!c) {
+    lock_release();
+    return FS_FILE_WRITEERROR;
+  }
   ProgCtx ctx = {psrc, pdst};
+  int rc = FS_FILE_OK;
   if (cp_upload(c, local, remote, progress_cb, &ctx) != 0) {
     const char* err = cp_last_error(c);
     logmsg(MSGTYPE_IMPORTANTERROR, err);
-    if (strstr(err, "aborted")) return FS_FILE_USERABORT;
-    drop_conn();
-    return FS_FILE_WRITEERROR;
+    if (strstr(err, "aborted")) {
+      rc = FS_FILE_USERABORT;
+    } else {
+      drop_conn();
+      rc = FS_FILE_WRITEERROR;
+    }
   }
-  return FS_FILE_OK;
+  lock_release();
+  return rc;
 }
 
 static BOOL do_delete(const char* remote) {
+  lock_acquire();
   CpSerial* c = conn();
-  if (!c) return FALSE;
-  if (cp_remove(c, remote) != 0) {
-    logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
+  if (!c) {
+    lock_release();
     return FALSE;
   }
-  return TRUE;
+  BOOL ok = TRUE;
+  if (cp_remove(c, remote) != 0) {
+    logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
+    ok = FALSE;
+  }
+  lock_release();
+  return ok;
 }
 
 static BOOL do_mkdir(const char* path) {
+  lock_acquire();
   CpSerial* c = conn();
-  if (!c) return FALSE;
-  if (cp_mkdir(c, path) != 0) {
-    logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
+  if (!c) {
+    lock_release();
     return FALSE;
   }
-  return TRUE;
+  BOOL ok = TRUE;
+  if (cp_mkdir(c, path) != 0) {
+    logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
+    ok = FALSE;
+  }
+  lock_release();
+  return ok;
 }
 
 static int do_rename(const char* a, const char* b) {
+  lock_acquire();
   CpSerial* c = conn();
-  if (!c) return FS_FILE_WRITEERROR;
+  if (!c) {
+    lock_release();
+    return FS_FILE_WRITEERROR;
+  }
+  int rc = FS_FILE_OK;
   if (cp_rename(c, a, b) != 0) {
     logmsg(MSGTYPE_IMPORTANTERROR, cp_last_error(c));
     drop_conn();
-    return FS_FILE_WRITEERROR;
+    rc = FS_FILE_WRITEERROR;
   }
-  return FS_FILE_OK;
+  lock_release();
+  return rc;
 }
 
 // --- ANSI exports -----------------------------------------------------------
@@ -459,6 +553,7 @@ WFX_EXPORT int FsRenMovFileW(WCHAR* OldName, WCHAR* NewName, BOOL Move, BOOL Ove
 // --- plugin lifecycle -------------------------------------------------------
 WFX_EXPORT int FsInit(int PluginNr, tProgressProc pProgress, tLogProc pLog, tRequestProc pRequest) {
   (void)pRequest;
+  lock_init();
   g_unicode = 0;
   g_plugin_nr = PluginNr;
   g_progA = pProgress;
@@ -468,6 +563,7 @@ WFX_EXPORT int FsInit(int PluginNr, tProgressProc pProgress, tLogProc pLog, tReq
 
 WFX_EXPORT int FsInitW(int PluginNr, tProgressProcW pProgress, tLogProcW pLog, tRequestProcW pRequest) {
   (void)pRequest;
+  lock_init();
   g_unicode = 1;
   g_plugin_nr = PluginNr;
   g_progW = pProgress;

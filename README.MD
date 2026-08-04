@@ -34,9 +34,9 @@ make dist-windows    # release zip:  dist/crosspoint-usb-wfx-windows.zip
    ```sh
    pacman -S mingw-w64-x86_64-gcc mingw-w64-i686-gcc make zip
    ```
-3. Double-click **`build.bat`** (or run it from cmd). It produces
-   `dist\crosspoint-usb-wfx-windows.zip` containing both the 32-bit `.wfx`
-   and 64-bit `.wfx64` binaries.
+3. Right-click **`build.ps1`** → *Run with PowerShell* (or run it from a
+   PowerShell prompt). It produces `dist\crosspoint-usb-wfx-windows.zip`
+   containing both the 32-bit `.wfx` and 64-bit `.wfx64` binaries.
 
 Files: `crosspoint.c` (the WFX plugin), `../protocol/cp_serial.c/.h` (the
 serial transport, shared protocol logic), `wfxplugin.h` (trimmed WFX API +

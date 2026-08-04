@@ -84,8 +84,17 @@ static int port_read(CpSerial* s, uint8_t* buf, size_t n, int timeout_ms) {
     int remaining = (int)(deadline - now_ms());
     if (remaining <= 0) break;
 #ifdef _WIN32
+    // ReadIntervalTimeout=MAXDWORD with a non-zero ReadTotalTimeoutConstant
+    // and ReadTotalTimeoutMultiplier=0 is the documented "return immediately"
+    // combination: ReadFile does NOT wait up to remaining ms, it returns
+    // at once with whatever is already buffered (often 0). Setting it fresh
+    // every call therefore turned this into a busy-poll loop instead of a
+    // real blocking-with-timeout read, which under load (e.g. lock
+    // release/reacquire churn from the progress callback) could starve
+    // actual reads and surface as "timeout: got N of 2048 bytes" well
+    // before the nominal deadline. Use a real timeout: no interval timeout,
+    // just a total timeout for the whole requested read.
     COMMTIMEOUTS to = {0};
-    to.ReadIntervalTimeout = MAXDWORD;
     to.ReadTotalTimeoutConstant = (DWORD)remaining;
     SetCommTimeouts(s->h, &to);
     DWORD rd = 0;
@@ -556,6 +565,19 @@ CpSerial* cp_open(const char* port) {
   dcb.fBinary = TRUE;
   dcb.fDtrControl = DTR_CONTROL_DISABLE;
   dcb.fRtsControl = RTS_CONTROL_DISABLE;
+  // Explicitly disable all output/input handshaking. GetCommState() above only
+  // seeds dcb from the driver's current defaults, and some Windows USB-CDC
+  // driver configurations default to CTS/DSR output flow control enabled. The
+  // ESP32-C3 native USB-CDC gadget never asserts CTS/DSR, so if left on,
+  // WriteFile() can block/silently withhold bytes waiting for a handshake
+  // signal that will never come — the device then times out waiting for an
+  // ACK the host believes it already sent.
+  dcb.fOutxCtsFlow = FALSE;
+  dcb.fOutxDsrFlow = FALSE;
+  dcb.fDsrSensitivity = FALSE;
+  dcb.fOutX = FALSE;
+  dcb.fInX = FALSE;
+  dcb.fTXContinueOnXoff = TRUE;
   SetCommState(s->h, &dcb);
 #else
   if (!port || !port[0]) {
@@ -684,9 +706,18 @@ static int cp_download_once(CpSerial* s, const char* remote, const char* local, 
   uint32_t crc = 0, remaining = size;
   uint8_t buf[CHUNK];
   int last_pct = -1;
+  int chunk_no = 0;
   while (remaining > 0) {
     size_t want = remaining < CHUNK ? remaining : CHUNK;
+    uint64_t chunk_start = now_ms();
     if (read_exact(s, buf, want, 30000) != 0) {
+      // Append chunk/offset/timing context to whatever read_exact set, so the
+      // status line TC shows (e.g. "timeout: got 43 of 2048 bytes") also says
+      // where in the transfer it happened and how long we waited.
+      char base[256];
+      snprintf(base, sizeof(base), "%s", s->err);
+      set_err(s, "%s (chunk %d, offset %u/%u, waited %ums)", base, chunk_no, size - remaining, size,
+              (unsigned)(now_ms() - chunk_start));
       fclose(f);
       return -1;
     }
@@ -698,6 +729,7 @@ static int cp_download_once(CpSerial* s, const char* remote, const char* local, 
       return -1;
     }
     remaining -= (uint32_t)want;
+    chunk_no++;
     if (progress_report(cb, size - remaining, size, &last_pct, user)) {
       fclose(f);
       set_err(s, "aborted");
@@ -762,6 +794,7 @@ int cp_upload(CpSerial* s, const char* local, const char* remote, CpProgress cb,
   uint64_t sent = 0;
   uint8_t buf[CHUNK];
   size_t n;
+  int chunk_no = 0;
   while ((n = fread(buf, 1, CHUNK, f)) > 0) {
     if (port_write(s, buf, n) != 0) {
       fclose(f);
@@ -769,10 +802,16 @@ int cp_upload(CpSerial* s, const char* local, const char* remote, CpProgress cb,
     }
     crc = crc32_update(crc, buf, n);
     uint8_t ack;
+    uint64_t ack_wait_start = now_ms();
     if (read_exact(s, &ack, 1, 30000) != 0) {
+      char base[256];
+      snprintf(base, sizeof(base), "%s", s->err);
+      set_err(s, "%s (chunk %d, offset %llu/%ld, waited %ums)", base, chunk_no, (unsigned long long)sent, total,
+              (unsigned)(now_ms() - ack_wait_start));
       fclose(f);
       return -1;
     }
+    chunk_no++;
     if (ack != ACK) {
       fclose(f);
       // Device sent an error response instead of a 0x06 ACK. Read the rest of
